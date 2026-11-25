@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import type { AuthRequest, OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { Hono } from "hono";
 import setupGuide from "../docs/index.html";
+import privacyPage from "../docs/privacy.html";
 import {
 	BodyTooLarge,
 	exchangeGoogleCode,
@@ -58,6 +59,19 @@ app.get(
 	"/",
 	() =>
 		new Response(guide, {
+			headers: {
+				"Content-Type": "text/html; charset=utf-8",
+				"Cache-Control": "public, max-age=3600",
+			},
+		}),
+);
+
+// Google requires a privacy policy link before an External app can be
+// published (Google Auth Platform > Branding).
+app.get(
+	"/privacy",
+	() =>
+		new Response(privacyPage as unknown as string, {
 			headers: {
 				"Content-Type": "text/html; charset=utf-8",
 				"Cache-Control": "public, max-age=3600",
