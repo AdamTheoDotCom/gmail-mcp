@@ -41,6 +41,7 @@ import {
 	truncate,
 } from "./gmail";
 import { GoogleHandler } from "./google-handler";
+import { refuseBlockedLabels, toolsetFor } from "./toolset";
 import { BodyTooLarge, type Props, readBoundedBody, refreshGoogleToken } from "./utils";
 
 type TokenCache = { accessToken: string; expiresAt: number };
@@ -936,6 +937,13 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 		});
 	}
 
+	// The tools this deployment offers, from its TOOLSET variable. Tests that
+	// exercise every handler replace this with one returning null (no filter);
+	// a deployment has no way to do that.
+	protected allowedTools(): ReadonlySet<string> | null {
+		return toolsetFor((this.env as Env & { TOOLSET?: string }).TOOLSET);
+	}
+
 	async init() {
 		// Starting is what binds props for the life of the object, so a grant
 		// that does not own this session must not be the one to do it. Refusing
@@ -943,14 +951,23 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 		// with their own grant, rather than every call failing until eviction.
 		const account = (await this.ownerProps()).email;
 
-		this.server.tool(
+		// Only the tools in this deployment's toolset are registered; the rest
+		// do not exist for the client at all (see src/toolset.ts).
+		const allowed = this.allowedTools();
+		const server = this.server;
+		const tool = ((name: string, ...rest: unknown[]) => {
+			if (allowed && !allowed.has(name)) return undefined;
+			return (server.tool as (...args: unknown[]) => unknown).call(server, name, ...rest);
+		}) as typeof server.tool;
+
+		tool(
 			"whoami",
 			`Show which Gmail account this connection is bound to (${account})`,
 			{},
 			async () => this.text(await this.api("/profile")),
 		);
 
-		this.server.tool(
+		tool(
 			"search_messages",
 			`Search mail in ${account} with Gmail query syntax (from:, to:, subject:, is:unread, newer_than:7d, ...)`,
 			{
@@ -978,7 +995,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"get_message",
 			`Read a full message from ${account}, including decoded body text`,
 			{ messageId: z.string() },
@@ -995,7 +1012,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"get_thread",
 			`Read a conversation thread from ${account}. Bodies share a total budget, so long threads come back summarized — read individual messages with get_message`,
 			{
@@ -1068,12 +1085,12 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool("list_labels", `List labels in ${account}`, {}, async () => {
+		tool("list_labels", `List labels in ${account}`, {}, async () => {
 			const l = await this.api<LabelList>("/labels");
 			return this.text((l.labels ?? []).map((x) => ({ id: x.id, name: x.name, type: x.type })));
 		});
 
-		this.server.tool(
+		tool(
 			"modify_labels",
 			`Add or remove labels on a message in ${account} (also archives: remove INBOX; marks read: remove UNREAD)`,
 			{
@@ -1082,6 +1099,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 				removeLabelIds: z.array(z.string()).default([]),
 			},
 			async ({ messageId, addLabelIds, removeLabelIds }) => {
+				refuseBlockedLabels(addLabelIds);
 				// The modify/trash responses carry no payload, so headers would be
 				// empty; report the label state that actually changed.
 				const m = await this.api(`/messages/${encodeURIComponent(messageId)}/modify`, {
@@ -1092,7 +1110,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"trash_message",
 			`Move a message to the trash in ${account} (reversible for 30 days)`,
 			{ messageId: z.string() },
@@ -1116,7 +1134,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			inlineImages: z.array(inlineImageSchema).default([]),
 		};
 
-		this.server.tool(
+		tool(
 			"create_draft",
 			`Create a draft in ${account} without sending. With replyToMessageId the draft joins that message's thread, carries its threading headers, and derives recipients and subject from a reply-all when they are not given`,
 			{
@@ -1159,7 +1177,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"update_draft",
 			`Change parts of a draft in ${account}. Whatever is not passed keeps its current value — recipients, subject, text, files added in any client, and the thread the draft answers all survive the rebuild`,
 			{
@@ -1262,7 +1280,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"send_draft",
 			`Send an existing draft from ${account}`,
 			{ draftId: z.string() },
@@ -1275,7 +1293,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"delete_draft",
 			`Delete a draft in ${account} permanently (drafts have no trash)`,
 			{ draftId: z.string() },
@@ -1285,7 +1303,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"list_drafts",
 			`List drafts in ${account}`,
 			{
@@ -1318,7 +1336,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"stage_attachment_begin",
 			`Stage a file for ${account} outside tool arguments, for attachments whose base64 is too large to pass inline. Then either PUT the raw file bytes to the returned uploadUrl (curl -T <file> '<uploadUrl>'), which finishes the staging by itself, or send base64 with stage_attachment_append and seal it with stage_attachment_finish. Any attachments or inlineImages field then accepts {"stagingId": ...}`,
 			{
@@ -1370,7 +1388,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"stage_attachment_append",
 			`Add base64 to a staged attachment in ${account}, in order, up to ${MAX_APPEND_CHARS} characters per call`,
 			{
@@ -1413,7 +1431,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"stage_attachment_finish",
 			`Seal a staged attachment in ${account} so messages and drafts can attach it by stagingId`,
 			{ stagingId: z.string() },
@@ -1435,7 +1453,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"send_message",
 			`Send mail as ${account}. For replies pass threadId plus the original's Message-ID header, or its Gmail message id, as inReplyTo`,
 			{
@@ -1493,7 +1511,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"reply_all",
 			`Reply to a message in ${account}, addressing every original recipient except this account, with the original quoted`,
 			{
@@ -1530,7 +1548,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"forward_message",
 			`Forward a message from ${account}, quoting the original above its own headers`,
 			{
@@ -1619,7 +1637,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"get_attachment",
 			`Download an attachment from a message in ${account}. Returns base64 while it stays small enough to read, and text types decoded; a larger file comes back as a downloadUrl to fetch with curl -o <file> '<downloadUrl>', valid for ${DOWNLOAD_TTL_MS / 60_000} minutes while this session stays open`,
 			{
@@ -1718,7 +1736,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"untrash_message",
 			`Restore a message from the trash in ${account}`,
 			{ messageId: z.string() },
@@ -1730,7 +1748,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"modify_thread_labels",
 			`Add or remove labels on every message of a thread in ${account}`,
 			{
@@ -1739,6 +1757,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 				removeLabelIds: z.array(z.string()).default([]),
 			},
 			async ({ threadId, addLabelIds, removeLabelIds }) => {
+				refuseBlockedLabels(addLabelIds);
 				const t = await this.api<{ id?: string; messages?: GmailMessage[] }>(
 					`/threads/${encodeURIComponent(threadId)}/modify`,
 					{
@@ -1750,7 +1769,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"trash_thread",
 			`Move a whole thread to the trash in ${account} (reversible for 30 days)`,
 			{ threadId: z.string() },
@@ -1762,7 +1781,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"untrash_thread",
 			`Restore a whole thread from the trash in ${account}`,
 			{ threadId: z.string() },
@@ -1774,7 +1793,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"batch_modify_messages",
 			`Add or remove labels on up to 1000 messages of ${account} in one call (archive: remove INBOX; mark read: remove UNREAD)`,
 			{
@@ -1783,6 +1802,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 				removeLabelIds: z.array(z.string()).default([]),
 			},
 			async ({ messageIds, addLabelIds, removeLabelIds }) => {
+				refuseBlockedLabels(addLabelIds);
 				await this.api("/messages/batchModify", {
 					method: "POST",
 					body: JSON.stringify({ ids: messageIds, addLabelIds, removeLabelIds }),
@@ -1791,7 +1811,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"create_label",
 			`Create a label in ${account}`,
 			{ name: z.string().describe("Nested labels use '/', e.g. Projects/Website") },
@@ -1808,7 +1828,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"update_label",
 			`Rename a label in ${account}`,
 			{ labelId: z.string(), name: z.string() },
@@ -1821,7 +1841,7 @@ export class GmailMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
-		this.server.tool(
+		tool(
 			"delete_label",
 			`Delete a label in ${account} (messages keep their other labels)`,
 			{ labelId: z.string() },
