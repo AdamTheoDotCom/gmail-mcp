@@ -33,7 +33,8 @@
 	"vars": {
 		// How many distinct Google accounts may ever complete sign-in. Raise it
 		// for a shared deployment; Google caps unverified apps at 100 users.
-		"MAX_ACCOUNTS": "25"
+		// Set to 2 for this fork: one sign-in for each of its two Google Workspace accounts.
+		"MAX_ACCOUNTS": "2"
 	},
 	"unsafe": {
 		"bindings": [

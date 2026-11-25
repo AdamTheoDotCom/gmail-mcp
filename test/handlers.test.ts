@@ -71,6 +71,9 @@ function makeAgent(email = "me@example.com") {
 		},
 	};
 	agent.env = { GOOGLE_CLIENT_ID: "id", GOOGLE_CLIENT_SECRET: "secret" };
+	// Every handler is exercised here, including those no toolset offers;
+	// test/toolset.test.ts covers what each deployment registers.
+	agent.allowedTools = () => null;
 	return { agent, handlers, storage };
 }
 
